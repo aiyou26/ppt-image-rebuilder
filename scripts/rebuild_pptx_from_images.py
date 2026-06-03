@@ -21,6 +21,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -42,6 +45,9 @@ EMU_PER_INCH = 914400
 DEFAULT_API_MODEL = "gpt-4.1-mini"
 DEFAULT_API_PROVIDER = "openai"
 DEFAULT_API_ENDPOINT_MODE = "auto"
+DEFAULT_OCR_API_PROVIDER = "ocr-space"
+DEFAULT_OCR_API_ENDPOINT = "https://api.ocr.space/parse/image"
+DEFAULT_AZURE_VISION_API_VERSION = "2024-02-01"
 
 
 
@@ -63,6 +69,14 @@ class ApiConfig:
     model: str
     base_url: Optional[str] = None
     endpoint_mode: str = DEFAULT_API_ENDPOINT_MODE
+
+
+@dataclass
+class DedicatedOcrConfig:
+    provider: str
+    api_key: str
+    endpoint: Optional[str] = None
+    language: Optional[str] = None
 
 
 def natural_key(path: Path) -> List[Any]:
@@ -394,6 +408,193 @@ def choose_endpoint_mode_interactively(default_mode: str) -> str:
         print("Please enter 1, 2, or 3.")
 
 
+
+def normalize_dedicated_ocr_provider(provider: str) -> str:
+    provider = provider.lower().strip().replace("_", "-")
+    aliases = {
+        "ocrspace": "ocr-space",
+        "ocr.space": "ocr-space",
+        "azure": "azure-vision",
+        "azure-read": "azure-vision",
+        "azure-ai-vision": "azure-vision",
+        "google": "google-vision",
+        "google-cloud-vision": "google-vision",
+        "gcv": "google-vision",
+    }
+    return aliases.get(provider, provider)
+
+
+def dedicated_ocr_key_env(provider: str) -> str:
+    if provider == "ocr-space":
+        return "OCR_SPACE_API_KEY"
+    if provider == "azure-vision":
+        return "AZURE_VISION_KEY"
+    if provider == "google-vision":
+        return "GOOGLE_VISION_API_KEY"
+    return "PPT_REBUILDER_OCR_API_KEY"
+
+
+def choose_dedicated_ocr_provider_interactively(default_provider: str) -> str:
+    print("\nChoose a dedicated OCR API provider:")
+    print("  1) OCR.space API (simple OCR service; easiest to configure)")
+    print("  2) Azure AI Vision Read OCR")
+    print("  3) Google Cloud Vision OCR")
+    print("  4) Cancel dedicated OCR API")
+    default_choice = {"ocr-space": "1", "azure-vision": "2", "google-vision": "3"}.get(default_provider, "1")
+    mapping = {"1": "ocr-space", "2": "azure-vision", "3": "google-vision", "4": "cancel"}
+    while True:
+        choice = input(f"Select 1, 2, 3, or 4 [{default_choice}]: ").strip() or default_choice
+        if choice in mapping:
+            return mapping[choice]
+        print("Please enter 1, 2, 3, or 4.")
+
+
+def ensure_dedicated_ocr_config(args: argparse.Namespace) -> Optional[DedicatedOcrConfig]:
+    cached = getattr(args, "_dedicated_ocr_config_cache", None)
+    if cached is not None:
+        return cached
+
+    env_path = Path(args.env_file).expanduser().resolve() if args.env_file else Path.cwd() / ".env"
+    env = dotenv_values(env_path)
+
+    provider = first_present(
+        args.ocr_api_provider,
+        os.environ.get("PPT_REBUILDER_OCR_API_PROVIDER"),
+        env.get("PPT_REBUILDER_OCR_API_PROVIDER"),
+        DEFAULT_OCR_API_PROVIDER,
+    ) or DEFAULT_OCR_API_PROVIDER
+    provider = normalize_dedicated_ocr_provider(provider)
+    if provider not in {"ocr-space", "azure-vision", "google-vision"}:
+        print(
+            f"Unsupported dedicated OCR API provider '{provider}'. Use ocr-space, azure-vision, or google-vision.",
+            file=sys.stderr,
+        )
+        return None
+
+    if args.ocr_api_config_wizard and args.interactive:
+        selected = choose_dedicated_ocr_provider_interactively(provider)
+        if selected == "cancel":
+            return None
+        provider = selected
+
+    default_key_env = dedicated_ocr_key_env(provider)
+    key_env = args.ocr_api_key_env or default_key_env
+    api_key = first_present(
+        args.ocr_api_key,
+        os.environ.get(key_env),
+        env.get(key_env),
+        os.environ.get("PPT_REBUILDER_OCR_API_KEY"),
+        env.get("PPT_REBUILDER_OCR_API_KEY"),
+        os.environ.get(default_key_env),
+        env.get(default_key_env),
+    )
+
+    endpoint_default = DEFAULT_OCR_API_ENDPOINT if provider == "ocr-space" else None
+    endpoint = first_present(
+        args.ocr_api_endpoint,
+        os.environ.get("PPT_REBUILDER_OCR_API_ENDPOINT"),
+        env.get("PPT_REBUILDER_OCR_API_ENDPOINT"),
+        os.environ.get("AZURE_VISION_ENDPOINT") if provider == "azure-vision" else None,
+        env.get("AZURE_VISION_ENDPOINT") if provider == "azure-vision" else None,
+        endpoint_default,
+    )
+
+    language = first_present(
+        args.ocr_api_language,
+        os.environ.get("PPT_REBUILDER_OCR_API_LANGUAGE"),
+        env.get("PPT_REBUILDER_OCR_API_LANGUAGE"),
+    )
+
+    if args.interactive and args.ocr_api_config_wizard:
+        if provider == "ocr-space":
+            print("\nOCR.space selected. Ask your provider account page for the OCR.space API key.")
+            if not endpoint:
+                endpoint = DEFAULT_OCR_API_ENDPOINT
+        elif provider == "azure-vision":
+            print("\nAzure AI Vision selected. You need the Azure Vision endpoint URL and key.")
+            print("Example endpoint format: https://YOUR-RESOURCE.cognitiveservices.azure.com")
+            if not endpoint:
+                endpoint = input("Azure Vision endpoint URL: ").strip()
+        elif provider == "google-vision":
+            print("\nGoogle Cloud Vision selected. This simple setup uses an API key for the REST API.")
+            endpoint = endpoint or "https://vision.googleapis.com/v1/images:annotate"
+
+        if not api_key:
+            label = {
+                "ocr-space": "OCR.space API key",
+                "azure-vision": "Azure Vision key",
+                "google-vision": "Google Vision API key",
+            }.get(provider, "OCR API key")
+            api_key = getpass.getpass(f"Enter {label}: ").strip()
+
+        if provider == "ocr-space":
+            current_lang = language or "eng"
+            entered_lang = input(f"OCR.space language code [{current_lang}]: ").strip()
+            if entered_lang:
+                language = entered_lang
+        elif provider == "azure-vision":
+            current_lang = language or "auto"
+            entered_lang = input(f"Azure OCR language hint, or auto [{current_lang}]: ").strip()
+            if entered_lang and entered_lang.lower() != "auto":
+                language = entered_lang
+            elif not entered_lang:
+                language = None
+        elif provider == "google-vision":
+            current_lang = language or "auto"
+            entered_lang = input(f"Google OCR language hint, or auto [{current_lang}]: ").strip()
+            if entered_lang and entered_lang.lower() != "auto":
+                language = entered_lang
+            elif not entered_lang:
+                language = None
+
+    if not api_key:
+        print("No dedicated OCR API key provided; dedicated OCR API cannot run.", file=sys.stderr)
+        return None
+    if provider == "azure-vision" and not endpoint:
+        print("Azure Vision OCR requires --ocr-api-endpoint or interactive endpoint entry.", file=sys.stderr)
+        return None
+    if provider == "ocr-space" and not endpoint:
+        endpoint = DEFAULT_OCR_API_ENDPOINT
+    if provider == "google-vision" and not endpoint:
+        endpoint = "https://vision.googleapis.com/v1/images:annotate"
+
+    os.environ[key_env] = api_key
+    os.environ["PPT_REBUILDER_OCR_API_PROVIDER"] = provider
+    if endpoint:
+        os.environ["PPT_REBUILDER_OCR_API_ENDPOINT"] = endpoint
+    if language:
+        os.environ["PPT_REBUILDER_OCR_API_LANGUAGE"] = language
+
+    save_values: Dict[str, str] = {}
+    if args.interactive and (args.ocr_api_config_wizard or args.save_ocr_api_config):
+        print(f"\nConfiguration file: {env_path}")
+        if args.save_ocr_api_config or ask_yes_no("Save non-secret OCR API settings so next run can reuse them?", default=True):
+            save_values["PPT_REBUILDER_OCR_API_PROVIDER"] = provider
+            if endpoint:
+                save_values["PPT_REBUILDER_OCR_API_ENDPOINT"] = endpoint
+            if language:
+                save_values["PPT_REBUILDER_OCR_API_LANGUAGE"] = language
+        if args.save_ocr_api_key or ask_yes_no("Save the OCR API key to this local .env file? Only choose yes on your own private computer.", default=False):
+            save_values[key_env] = api_key
+            save_values["PPT_REBUILDER_OCR_API_KEY"] = api_key
+        if save_values:
+            save_dotenv_values(save_values, env_path)
+            print(f"Saved dedicated OCR API settings to {env_path} with restricted file permissions when supported.")
+    elif args.save_ocr_api_config or args.save_ocr_api_key:
+        save_values["PPT_REBUILDER_OCR_API_PROVIDER"] = provider
+        if endpoint:
+            save_values["PPT_REBUILDER_OCR_API_ENDPOINT"] = endpoint
+        if language:
+            save_values["PPT_REBUILDER_OCR_API_LANGUAGE"] = language
+        if args.save_ocr_api_key:
+            save_values[key_env] = api_key
+            save_values["PPT_REBUILDER_OCR_API_KEY"] = api_key
+        save_dotenv_values(save_values, env_path)
+
+    config = DedicatedOcrConfig(provider=provider, api_key=api_key, endpoint=endpoint, language=language)
+    setattr(args, "_dedicated_ocr_config_cache", config)
+    return config
+
 def ensure_api_config(args: argparse.Namespace) -> Optional[ApiConfig]:
     cached = getattr(args, "_api_config_cache", None)
     if cached is not None:
@@ -570,7 +771,13 @@ def choose_ocr_mode(args: argparse.Namespace) -> str:
             args.api_config_wizard = True
         if ensure_api_config(args):
             return "api"
-        raise SystemExit("API OCR is unavailable. Provide OPENAI_API_KEY or rerun with --ocr local/none.")
+        raise SystemExit("AI vision recognition is unavailable. Provide API settings or rerun with --ocr local/ocr-api/none.")
+    if args.ocr == "ocr-api":
+        if args.interactive and not args.ocr_api_provider:
+            args.ocr_api_config_wizard = True
+        if ensure_dedicated_ocr_config(args):
+            return "ocr-api"
+        raise SystemExit("Dedicated OCR API is unavailable. Provide OCR API settings or rerun with --ocr local/api/none.")
 
     # auto mode: prefer installed local OCR; if missing, ask the user what to do.
     if local_ocr_available():
@@ -585,9 +792,10 @@ def choose_ocr_mode(args: argparse.Namespace) -> str:
     while True:
         print("\nLocal OCR is not available. Choose how to continue:")
         print("  1) Install local OCR automatically, then use local OCR")
-        print("  2) Configure API OCR: OpenAI or third-party OpenAI-compatible API")
-        print("  3) Skip OCR and create a visual-reference PPT only")
-        choice = input("Select 1, 2, or 3: ").strip()
+        print("  2) Configure AI vision recognition: OpenAI or third-party OpenAI-compatible API")
+        print("  3) Configure dedicated OCR API: OCR.space, Azure Vision, or Google Vision")
+        print("  4) Skip recognition and create a visual-reference PPT only")
+        choice = input("Select 1, 2, 3, or 4: ").strip()
         if choice == "1":
             if ensure_local_ocr(auto_install=True):
                 return "local"
@@ -596,11 +804,16 @@ def choose_ocr_mode(args: argparse.Namespace) -> str:
             args.api_config_wizard = True
             if ensure_api_config(args):
                 return "api"
-            print("API configuration did not finish successfully.")
+            print("AI vision configuration did not finish successfully.")
         elif choice == "3":
+            args.ocr_api_config_wizard = True
+            if ensure_dedicated_ocr_config(args):
+                return "ocr-api"
+            print("Dedicated OCR API configuration did not finish successfully.")
+        elif choice == "4":
             return "none"
         else:
-            print("Please enter 1, 2, or 3.")
+            print("Please enter 1, 2, 3, or 4.")
 
 
 def ocr_with_tesseract(image_path: Path, min_confidence: float, lang: str) -> List[TextItem]:
@@ -779,6 +992,185 @@ def ocr_with_api(image_path: Path, api_config: ApiConfig, prompt: Optional[str] 
         print(f"Warning: API OCR failed for {image_path.name} using {api_config.provider} at {location}: {exc}", file=sys.stderr)
     return []
 
+
+def http_request_json(url: str, *, headers: Dict[str, str], body: bytes) -> Dict[str, Any]:
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw_error = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {raw_error[:1000]}") from exc
+    return json.loads(raw)
+
+
+def box_from_points(points: Sequence[Any], image_width: int, image_height: int) -> Optional[Tuple[float, float, float, float]]:
+    xs: List[float] = []
+    ys: List[float] = []
+    if points and all(isinstance(point, (int, float)) for point in points):
+        flat = list(points)
+        for i in range(0, len(flat) - 1, 2):
+            xs.append(float(flat[i]))
+            ys.append(float(flat[i + 1]))
+    else:
+        for point in points:
+            if isinstance(point, dict):
+                if "x" in point and "y" in point:
+                    xs.append(float(point.get("x", 0)))
+                    ys.append(float(point.get("y", 0)))
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                xs.append(float(point[0]))
+                ys.append(float(point[1]))
+    if not xs or not ys:
+        return None
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+    return x1 / max(image_width, 1), y1 / max(image_height, 1), max(1.0, x2 - x1) / max(image_width, 1), max(1.0, y2 - y1) / max(image_height, 1)
+
+
+def add_text_item_from_box(items: List[TextItem], text: str, box: Optional[Tuple[float, float, float, float]], confidence: Optional[float] = None) -> None:
+    clean = str(text or "").strip()
+    if not clean or not box:
+        return
+    x, y, w, h = box
+    items.append(TextItem(text=clean, x=x, y=y, w=w, h=h, confidence=confidence))
+
+
+def ocr_with_ocr_space(image_path: Path, config: DedicatedOcrConfig) -> List[TextItem]:
+    endpoint = config.endpoint or DEFAULT_OCR_API_ENDPOINT
+    language = config.language or "eng"
+    form = {
+        "apikey": config.api_key,
+        "language": language,
+        "isOverlayRequired": "true",
+        "scale": "true",
+        "OCREngine": "2",
+        "base64Image": data_url_for_image(image_path),
+    }
+    body = urllib.parse.urlencode(form).encode("utf-8")
+    payload = http_request_json(
+        endpoint,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body=body,
+    )
+    if payload.get("IsErroredOnProcessing"):
+        error = payload.get("ErrorMessage") or payload.get("ErrorDetails") or "unknown OCR.space error"
+        raise RuntimeError(str(error))
+
+    with Image.open(image_path) as img:
+        image_width, image_height = img.size
+
+    items: List[TextItem] = []
+    for result in payload.get("ParsedResults", []) or []:
+        overlay = result.get("TextOverlay") or {}
+        for line in overlay.get("Lines", []) or []:
+            words = line.get("Words", []) or []
+            text = line.get("LineText") or " ".join(str(word.get("WordText", "")).strip() for word in words)
+            if words:
+                lefts = [float(word.get("Left", 0)) for word in words]
+                tops = [float(word.get("Top", 0)) for word in words]
+                rights = [float(word.get("Left", 0)) + float(word.get("Width", 0)) for word in words]
+                bottoms = [float(word.get("Top", 0)) + float(word.get("Height", 0)) for word in words]
+                box = (min(lefts) / image_width, min(tops) / image_height, max(1.0, max(rights) - min(lefts)) / image_width, max(1.0, max(bottoms) - min(tops)) / image_height)
+                add_text_item_from_box(items, text, box)
+        if not items:
+            parsed = str(result.get("ParsedText", "")).strip()
+            if parsed:
+                for i, line_text in enumerate([line.strip() for line in parsed.splitlines() if line.strip()]):
+                    add_text_item_from_box(items, line_text, (0.05, 0.05 + i * 0.06, 0.90, 0.05))
+    return items
+
+
+def azure_vision_url(endpoint: str, language: Optional[str]) -> str:
+    endpoint = endpoint.rstrip("/")
+    if "imageanalysis:analyze" in endpoint:
+        url = endpoint
+    else:
+        url = f"{endpoint}/computervision/imageanalysis:analyze"
+    sep = "&" if "?" in url else "?"
+    params = {"api-version": DEFAULT_AZURE_VISION_API_VERSION, "features": "read"}
+    if language:
+        params["language"] = language
+    return url + sep + urllib.parse.urlencode(params)
+
+
+def ocr_with_azure_vision(image_path: Path, config: DedicatedOcrConfig) -> List[TextItem]:
+    if not config.endpoint:
+        raise RuntimeError("Azure Vision endpoint is required.")
+    with Image.open(image_path) as img:
+        image_width, image_height = img.size
+    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    body = image_path.read_bytes()
+    payload = http_request_json(
+        azure_vision_url(config.endpoint, config.language),
+        headers={"Ocp-Apim-Subscription-Key": config.api_key, "Content-Type": mime},
+        body=body,
+    )
+    items: List[TextItem] = []
+    read_result = payload.get("readResult") or payload.get("read_result") or {}
+    for block in read_result.get("blocks", []) or []:
+        for line in block.get("lines", []) or []:
+            box = box_from_points(line.get("boundingPolygon") or line.get("bounding_poly") or [], image_width, image_height)
+            add_text_item_from_box(items, line.get("text", ""), box)
+    return items
+
+
+def google_vision_url(endpoint: str, api_key: str) -> str:
+    endpoint = endpoint or "https://vision.googleapis.com/v1/images:annotate"
+    if "key=" in endpoint:
+        return endpoint
+    sep = "&" if "?" in endpoint else "?"
+    return endpoint + sep + urllib.parse.urlencode({"key": api_key})
+
+
+def ocr_with_google_vision(image_path: Path, config: DedicatedOcrConfig) -> List[TextItem]:
+    with Image.open(image_path) as img:
+        image_width, image_height = img.size
+    encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    image_context: Dict[str, Any] = {}
+    if config.language:
+        image_context["languageHints"] = [config.language]
+    request_item: Dict[str, Any] = {
+        "image": {"content": encoded},
+        "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+    }
+    if image_context:
+        request_item["imageContext"] = image_context
+    body = json.dumps({"requests": [request_item]}).encode("utf-8")
+    payload = http_request_json(
+        google_vision_url(config.endpoint or "https://vision.googleapis.com/v1/images:annotate", config.api_key),
+        headers={"Content-Type": "application/json"},
+        body=body,
+    )
+    response = (payload.get("responses") or [{}])[0]
+    if response.get("error"):
+        raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
+    annotations = response.get("textAnnotations") or []
+    items: List[TextItem] = []
+    for annotation in annotations[1:]:
+        vertices = ((annotation.get("boundingPoly") or {}).get("vertices") or [])
+        box = box_from_points(vertices, image_width, image_height)
+        add_text_item_from_box(items, annotation.get("description", ""), box)
+    if not items and annotations:
+        vertices = ((annotations[0].get("boundingPoly") or {}).get("vertices") or [])
+        box = box_from_points(vertices, image_width, image_height) or (0.05, 0.05, 0.90, 0.90)
+        add_text_item_from_box(items, annotations[0].get("description", ""), box)
+    return items
+
+
+def ocr_with_dedicated_api(image_path: Path, config: DedicatedOcrConfig) -> List[TextItem]:
+    try:
+        if config.provider == "ocr-space":
+            return ocr_with_ocr_space(image_path, config)
+        if config.provider == "azure-vision":
+            return ocr_with_azure_vision(image_path, config)
+        if config.provider == "google-vision":
+            return ocr_with_google_vision(image_path, config)
+        raise RuntimeError(f"Unsupported dedicated OCR API provider: {config.provider}")
+    except Exception as exc:
+        print(f"Warning: dedicated OCR API failed for {image_path.name} using {config.provider}: {exc}", file=sys.stderr)
+        return []
+
 def normalize_box(item: TextItem, image_width: int, image_height: int) -> Tuple[float, float, float, float]:
     values = [item.x, item.y, item.w, item.h]
     if all(-0.01 <= v <= 1.2 for v in values):
@@ -847,6 +1239,7 @@ def items_for_image(
     api_model: str,
     api_config: Optional[ApiConfig],
     api_prompt: Optional[str],
+    dedicated_ocr_config: Optional[DedicatedOcrConfig],
 ) -> List[TextItem]:
     if ocr_mode == "none":
         return []
@@ -864,6 +1257,13 @@ def items_for_image(
         if not api_config:
             return []
         return ocr_with_api(image_path, api_config, api_prompt)
+    if ocr_mode == "ocr-api":
+        explicit = ocr_data.get(image_path.name) or ocr_data.get(str(index + 1)) or []
+        if explicit:
+            return explicit
+        if not dedicated_ocr_config:
+            return []
+        return ocr_with_dedicated_api(image_path, dedicated_ocr_config)
     raise ValueError(f"Unsupported OCR mode: {ocr_mode}")
 
 
@@ -884,6 +1284,7 @@ def build_pptx(args: argparse.Namespace) -> None:
 
     resolved_ocr_mode = choose_ocr_mode(args)
     api_config = ensure_api_config(args) if resolved_ocr_mode == "api" else None
+    dedicated_ocr_config = ensure_dedicated_ocr_config(args) if resolved_ocr_mode == "ocr-api" else None
     api_prompt = Path(args.api_prompt).read_text(encoding="utf-8") if args.api_prompt else None
 
     total_text_items = 0
@@ -909,6 +1310,7 @@ def build_pptx(args: argparse.Namespace) -> None:
                 api_model=args.api_model,
                 api_config=api_config,
                 api_prompt=api_prompt,
+                dedicated_ocr_config=dedicated_ocr_config,
             )
             if args.max_text_items and len(text_items) > args.max_text_items:
                 text_items = text_items[: args.max_text_items]
@@ -938,7 +1340,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--slide-size", choices=["auto", "16:9", "4:3"], default="auto", help="Output slide size.")
     parser.add_argument("--background-mode", choices=["full", "none"], default="full", help="Place source images on slides or omit them.")
     parser.add_argument("--reference-opacity", type=float, default=1.0, help="Opacity for source image layer, from 0 to 1.")
-    parser.add_argument("--ocr", choices=["auto", "local", "api", "json", "none"], default="auto", help="OCR source for editable text boxes.")
+    parser.add_argument("--ocr", choices=["auto", "local", "api", "ocr-api", "json", "none"], default="auto", help="Recognition source for editable text boxes: local OCR, AI vision API, dedicated OCR API, JSON, or none.")
     parser.add_argument("--ocr-json", help="Optional sidecar OCR JSON file.")
     parser.add_argument("--ocr-lang", default="eng+chi_sim", help="Tesseract language setting, e.g. eng, chi_sim, or eng+chi_sim.")
     parser.add_argument("--min-confidence", type=float, default=55.0, help="Minimum local OCR confidence for Tesseract words.")
@@ -952,7 +1354,15 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--api-key-env", help="Name of the environment variable that stores the API key. Defaults to OPENAI_API_KEY for OpenAI and PPT_REBUILDER_API_KEY for third-party APIs.")
     parser.add_argument("--env-file", help="Path to .env file for reading/saving API configuration. Default: ./.env")
     parser.add_argument("--api-prompt", help="Optional path to a custom prompt for API OCR JSON extraction.")
-    parser.add_argument("--api-config-wizard", action="store_true", help="Ask beginner-friendly questions to configure OpenAI or third-party API OCR.")
+    parser.add_argument("--api-config-wizard", action="store_true", help="Ask beginner-friendly questions to configure OpenAI or third-party AI vision recognition.")
+    parser.add_argument("--ocr-api-provider", choices=["ocr-space", "azure-vision", "google-vision"], help="Dedicated OCR API provider for --ocr ocr-api.")
+    parser.add_argument("--ocr-api-endpoint", help="Dedicated OCR API endpoint. Required for Azure Vision; optional for OCR.space and Google Vision.")
+    parser.add_argument("--ocr-api-key", help="Dedicated OCR API key. Prefer environment variables, .env, or interactive entry instead of this flag.")
+    parser.add_argument("--ocr-api-key-env", help="Name of the environment variable that stores the dedicated OCR API key.")
+    parser.add_argument("--ocr-api-language", help="Optional language hint/code for the dedicated OCR API, such as eng, chs, zh-Hans, or en.")
+    parser.add_argument("--ocr-api-config-wizard", action="store_true", help="Ask beginner-friendly questions to configure a dedicated OCR API such as OCR.space, Azure Vision, or Google Vision.")
+    parser.add_argument("--save-ocr-api-config", action="store_true", help="Save dedicated OCR provider/endpoint/language settings to the .env file without asking again.")
+    parser.add_argument("--save-ocr-api-key", action="store_true", help="Save an interactively supplied dedicated OCR API key to the .env file without asking again.")
     parser.add_argument("--save-api-config", action="store_true", help="Save provider/base URL/model settings to the .env file without asking again.")
     parser.add_argument("--save-api-key", action="store_true", help="Save an interactively supplied API key to the .env file without asking again.")
     parser.add_argument("--auto-install-local", action="store_true", help="For --ocr local, attempt automatic local OCR installation if missing.")

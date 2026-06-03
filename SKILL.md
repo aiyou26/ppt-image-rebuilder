@@ -1,13 +1,13 @@
 ---
 name: ppt-image-rebuilder
-description: rebuild editable powerpoint files from ppt-exported slide images such as png, jpg, or jpeg screenshots. use this when the user has images exported from slides and wants a best-effort editable .pptx, OCR text overlay, OpenAI API vision text extraction, OpenAI-compatible third-party API vision text extraction, local Tesseract OCR setup, layout reconstruction, visual reference backgrounds, or a repeatable workflow for converting static slide images back into powerpoint decks.
+description: rebuild editable powerpoint files from ppt-exported slide images such as png, jpg, or jpeg screenshots. use this when the user has images exported from slides and wants a best-effort editable .pptx, OCR text overlay, OpenAI API vision text extraction, OpenAI-compatible third-party API vision text extraction, dedicated OCR APIs such as OCR.space, Azure AI Vision, or Google Cloud Vision, local Tesseract OCR setup, layout reconstruction, visual reference backgrounds, or a repeatable workflow for converting static slide images back into powerpoint decks.
 ---
 
 # PPT Image Rebuilder
 
 ## Goal
 
-Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. Be explicit that image-to-PPT reconstruction cannot perfectly recover the original object tree. The preferred deliverable is a visually faithful PowerPoint with the original image as a reference/background plus editable text boxes from local OCR, OpenAI or OpenAI-compatible third-party API vision OCR, or a sidecar JSON file.
+Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. Be explicit that image-to-PPT reconstruction cannot perfectly recover the original object tree. The preferred deliverable is a visually faithful PowerPoint with the original image as a reference/background plus editable text boxes from local OCR, AI vision recognition through OpenAI or OpenAI-compatible third-party APIs, dedicated OCR APIs such as OCR.space/Azure Vision/Google Vision, or a sidecar JSON file.
 
 ## Default Workflow
 
@@ -21,9 +21,9 @@ Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. 
 3. Choose the text extraction route:
    - Start with `--ocr auto` unless the user explicitly chooses another route.
    - If local Tesseract OCR is already installed, `--ocr auto` uses it.
-   - If local OCR is missing and the script is interactive, it asks the user to choose automatic local installation, OpenAI API configuration, or no OCR.
+   - If local OCR is missing and the script is interactive, it asks the user to choose automatic local installation, AI vision API configuration, dedicated OCR API configuration, or no recognition.
    - If the user chooses local installation, attempt to install `pytesseract` and the Tesseract binary using the available system package manager.
-   - If the user chooses API OCR, run the API configuration wizard. Support the official OpenAI API and third-party OpenAI-compatible APIs by collecting provider, API base URL, API key, model name, and endpoint mode, optionally saving reusable settings to `.env`, installing the `openai` Python package if needed, and calling the configured vision model.
+   - If the user chooses AI vision recognition, run the API configuration wizard. Support the official OpenAI API and third-party OpenAI-compatible APIs by collecting provider, API base URL, API key, model name, and endpoint mode, optionally saving reusable settings to `.env`, installing the `openai` Python package if needed, and calling the configured vision model. If the user chooses dedicated OCR API, run the dedicated OCR API wizard. Support OCR.space, Azure AI Vision, and Google Cloud Vision by collecting provider-specific endpoint/key/language settings and optionally saving them to `.env`.
 4. Generate a first-pass editable deck:
    - Run `scripts/rebuild_pptx_from_images.py`.
    - Use `--background-mode full` for visually faithful output.
@@ -40,7 +40,7 @@ Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. 
 
 Run from the skill directory or adjust script paths as needed.
 
-Default interactive route. This uses local OCR if available; otherwise it asks whether to install local OCR, configure API OCR, or skip OCR:
+Default interactive route. This uses local OCR if available; otherwise it asks whether to install local OCR, configure AI vision recognition, configure a dedicated OCR API, or skip recognition:
 
 ```bash
 python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --output /path/to/editable.pptx --ocr auto --background-mode full
@@ -52,10 +52,16 @@ Force local OCR and automatically attempt installation if missing:
 python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --output /path/to/editable.pptx --ocr local --auto-install-local --background-mode full
 ```
 
-Force API OCR. In interactive mode, the script opens a beginner-friendly wizard and asks whether to use the official OpenAI API or a third-party OpenAI-compatible API:
+Force AI vision recognition. In interactive mode, the script opens a beginner-friendly wizard and asks whether to use the official OpenAI API or a third-party OpenAI-compatible API:
 
 ```bash
 python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --output /path/to/editable.pptx --ocr api --api-config-wizard --background-mode full
+```
+
+Force dedicated OCR API. In interactive mode, the script opens a beginner-friendly wizard and asks whether to use OCR.space, Azure AI Vision, or Google Cloud Vision:
+
+```bash
+python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --output /path/to/editable.pptx --ocr ocr-api --ocr-api-config-wizard --background-mode full
 ```
 
 
@@ -85,9 +91,10 @@ python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --outpu
 
 ## OCR Mode Rules
 
-- `--ocr auto`: Prefer installed local OCR. If local OCR is missing and interactive input is available, ask the user to choose local installation, API configuration, or no OCR. In non-interactive mode, continue with no OCR.
+- `--ocr auto`: Prefer installed local OCR. If local OCR is missing and interactive input is available, ask the user to choose local installation, AI vision API configuration, dedicated OCR API configuration, or no recognition. In non-interactive mode, continue with no OCR.
 - `--ocr local`: Use local Tesseract OCR. With `--auto-install-local`, attempt to install missing Python and system dependencies. If installation cannot complete because package managers or privileges are unavailable, stop with a clear error.
-- `--ocr api`: Use official OpenAI API or OpenAI-compatible third-party API vision OCR. Read provider settings from command-line flags, environment variables, or `.env`; if missing in interactive mode, run the API configuration wizard. Never hard-code API keys in the skill.
+- `--ocr api`: Use official OpenAI API or OpenAI-compatible third-party AI vision recognition. Read provider settings from command-line flags, environment variables, or `.env`; if missing in interactive mode, run the API configuration wizard. Never hard-code API keys in the skill.
+- `--ocr ocr-api`: Use a dedicated OCR API provider. Supported adapters: `ocr-space`, `azure-vision`, and `google-vision`. Read settings from command-line flags, environment variables, or `.env`; if missing in interactive mode, run `--ocr-api-config-wizard`.
 - `--ocr json`: Use sidecar OCR JSON and do not call OCR engines.
 - `--ocr none`: Do not create editable text boxes.
 
@@ -99,9 +106,20 @@ python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --outpu
   - `openai-compatible`: third-party API, gateway, or proxy that accepts OpenAI-style image requests. Uses `PPT_REBUILDER_API_KEY`, `PPT_REBUILDER_API_BASE_URL`, `PPT_REBUILDER_API_MODEL`, and `PPT_REBUILDER_API_ENDPOINT_MODE` by default.
 - For third-party APIs, ask the user for the provider's API Base URL, API Key, and vision-capable model name. Most compatible providers should use `--api-endpoint-mode chat-completions`; `auto` tries Responses first and then Chat Completions.
 - The script may save non-secret API settings to `.env` after asking. It may save API keys only after explicit user agreement or `--save-api-key`.
-- API OCR sends slide images to the configured provider. Tell the user before using this mode if the slides contain sensitive material.
-- API OCR can improve recognition for complex layouts, but coordinates are still estimates and should be reviewed.
-- Dedicated OCR services with non-OpenAI request formats, such as vendor-specific OCR APIs, require a separate adapter before use. Do not imply they are supported by the generic `openai-compatible` mode.
+- AI vision recognition sends slide images to the configured provider. Tell the user before using this mode if the slides contain sensitive material.
+- AI vision recognition can improve recognition for complex layouts, but coordinates are still estimates and should be reviewed.
+
+## Dedicated OCR API Configuration Notes
+
+- Use `--ocr ocr-api` for traditional OCR cloud services rather than multimodal AI vision models.
+- Supported dedicated OCR providers:
+  - `ocr-space`: requires an OCR.space API key. Endpoint defaults to `https://api.ocr.space/parse/image`.
+  - `azure-vision`: requires an Azure AI Vision endpoint URL and key.
+  - `google-vision`: requires a Google Cloud Vision API key. Endpoint defaults to the Google Vision REST annotate endpoint.
+- For beginner users, prefer `--ocr ocr-api --ocr-api-config-wizard` so they only answer guided questions.
+- Save non-secret settings with `--save-ocr-api-config`; save keys only when the user explicitly agrees or uses `--save-ocr-api-key`.
+- Dedicated OCR APIs send slide images to the configured OCR provider. Tell the user before using this mode if slides contain sensitive material.
+- Vendor APIs not listed above, such as Baidu OCR, Tencent OCR, or Alibaba OCR, still need separate adapters before use.
 
 ## OCR JSON Format
 
@@ -127,7 +145,7 @@ Coordinates may be normalized floats from 0 to 1, or absolute pixels relative to
 - Always preserve page order and slide count.
 - Use the slide image as a full-slide reference unless the user asks for an editable-only rebuild.
 - Do not claim the reconstructed deck is fully editable unless every major visual element has been recreated as PowerPoint objects.
-- Prefer editable text boxes for OCR/API text; keep text placement close to the original, even if font family is approximate.
+- Prefer editable text boxes for OCR/AI vision text; keep text placement close to the original, even if font family is approximate.
 - Use PowerPoint-native shapes only for simple, obvious geometry. Do not waste time tracing complex graphics that are better left as images.
 - Keep generated scripts and intermediate files in a predictable output folder when doing a multi-pass reconstruction.
 - When the user asks for high fidelity, keep the original image visible. When they ask for editability, fade or remove the original image only after recreating the main content.
@@ -146,8 +164,8 @@ Before returning the final deck, verify:
 ## Troubleshooting
 
 - If `python-pptx` is missing, install it in the working environment or add it to the project dependencies.
-- If local OCR produces no text, check whether `pytesseract`, the Tesseract binary, and the requested language pack are installed. Rerun with `--ocr api` or `--ocr none` if needed.
-- If automatic local installation fails, the environment may not have `brew`, `apt-get`, `conda`, `winget`, or sufficient permissions. Use API OCR or install Tesseract manually.
-- If API OCR fails, confirm the API key, internet access, the `openai` Python package, the selected provider, the base URL, the endpoint mode, and whether the selected model supports image input.
+- If local OCR produces no text, check whether `pytesseract`, the Tesseract binary, and the requested language pack are installed. Rerun with `--ocr api`, `--ocr ocr-api`, or `--ocr none` if needed.
+- If automatic local installation fails, the environment may not have `brew`, `apt-get`, `conda`, `winget`, or sufficient permissions. Use AI vision recognition or install Tesseract manually.
+- If AI vision recognition fails, confirm the API key, internet access, the `openai` Python package, the selected provider, the base URL, the endpoint mode, and whether the selected model supports image input. If dedicated OCR API fails, confirm provider, key, endpoint, language setting, quota, and internet access.
 - If coordinates look wrong with sidecar JSON, confirm whether OCR boxes are normalized or pixel-based and that they correspond to the same source image dimensions.
 - If output is blurry, use the highest-resolution slide exports available and avoid re-encoding the source images.

@@ -55,7 +55,7 @@ slide-images/
 
 ```text
 请使用这个 Skill，把 slide-images 文件夹里的图片生成 editable.pptx。
-如果本地没有 OCR 环境，请让我选择本地安装、使用 OpenAI API、使用第三方 API，或者跳过文字识别。
+如果本地没有 OCR 环境，请让我选择本地安装、AI 视觉识别、专用 OCR API，或者跳过文字识别。
 ```
 
 如果需要手动运行，可以使用：
@@ -75,13 +75,43 @@ editable.pptx
 
 这个文件就是新的 PPT。
 
-## OCR 是什么？
+## OCR、AI 视觉识别、专用 OCR API 有什么区别？
 
-OCR 可以理解为“识别图片里的文字”。
+### 本地 OCR
 
-因为你的 PPT 已经变成图片了，电脑原本不知道图片里写了什么。OCR 的作用就是尽量把图片里的文字读出来，再放回 PPT 里，变成可以编辑的文本框。
+本地 OCR 是在你的电脑或 Codex 环境里安装 OCR 工具，例如 Tesseract，然后用它识别图片里的文字。
 
-## 如果电脑没有 OCR，会发生什么？
+优点：不用联网到第三方识别服务，批量处理成本低。  
+缺点：安装可能麻烦，复杂版式和小字识别效果一般。
+
+### AI 视觉识别
+
+AI 视觉识别是把图片发给支持看图的 AI 模型，让模型读出文字并估计文字位置。
+
+这个工具支持：
+
+- OpenAI 官方 API；
+- 第三方 OpenAI 兼容接口。
+
+优点：对复杂页面、中文、自然排版通常更灵活。  
+缺点：需要 API Key、联网，可能产生费用；它不是传统 OCR 服务。
+
+### 专用 OCR API
+
+专用 OCR API 是云服务商专门提供的文字识别接口，不是通用 AI 聊天/视觉模型。
+
+当前这个工具已支持：
+
+- OCR.space；
+- Azure AI Vision Read OCR；
+- Google Cloud Vision OCR。
+
+优点：这是更传统、更明确的 OCR 服务路线。  
+缺点：不同服务商需要的 Key、Endpoint、语言代码不一样，识别效果和价格也不同。
+
+注意：百度 OCR、腾讯 OCR、阿里 OCR 这类接口格式不同，目前还没有内置适配器。如果要支持，需要后续单独增加。
+
+## 如果电脑没有本地 OCR，会发生什么？
 
 工具会询问你想用哪种方式：
 
@@ -89,22 +119,14 @@ OCR 可以理解为“识别图片里的文字”。
 当前没有检测到本地 OCR 环境。
 请选择：
 1. 自动安装本地 OCR
-2. 配置 API 识别文字
-3. 不识别文字，只生成图片版 PPT
+2. 配置 AI 视觉识别：OpenAI 或第三方 OpenAI 兼容 API
+3. 配置专用 OCR API：OCR.space、Azure Vision 或 Google Vision
+4. 不识别文字，只生成图片版 PPT
 ```
 
-如果你选择 **配置 API 识别文字**，工具会继续问你：
+你不用改代码，只需要根据提示选择和填写信息。
 
-```text
-请选择 API 服务：
-1. OpenAI 官方 API
-2. 第三方 OpenAI 兼容 API / 网关 / 代理
-3. 取消 API 识别
-```
-
-你不用改代码，只需要按提示填写信息。
-
-## 三种识别方式怎么选？
+## 四种方式怎么选？
 
 ### 方式一：自动安装本地 OCR
 
@@ -115,37 +137,43 @@ OCR 可以理解为“识别图片里的文字”。
 - 图片数量比较多；
 - 可以接受识别效果一般。
 
-优点：
+运行：
 
-- 不需要 API Key；
-- 可以离线处理；
-- 批量处理成本低。
+```bash
+python scripts/rebuild_pptx_from_images.py \
+  --input ./slide-images \
+  --output ./editable.pptx \
+  --ocr local \
+  --auto-install-local
+```
 
-缺点：
-
-- 复杂排版、小字、中文、艺术字可能识别不准；
-- 有些电脑权限不足时，自动安装可能失败。
-
-### 方式二：使用 OpenAI 官方 API
+### 方式二：AI 视觉识别
 
 适合你：
 
 - 不想安装 OCR；
-- 希望识别效果更好；
-- 有 OpenAI API Key；
+- 希望复杂页面识别效果更好；
+- 有 OpenAI API Key，或有第三方 OpenAI 兼容接口；
 - 可以接受联网和 API 费用。
 
-工具会提示你输入：
+运行配置向导：
 
-```text
-OPENAI_API_KEY
+```bash
+python scripts/rebuild_pptx_from_images.py \
+  --input ./slide-images \
+  --output ./editable.pptx \
+  --ocr api \
+  --api-config-wizard
 ```
 
-### 方式三：使用第三方 API
+它会让你选择：
 
-这个工具支持 **OpenAI 兼容接口** 的第三方 API。
+```text
+1. OpenAI 官方 API
+2. 第三方 OpenAI 兼容 API / 网关 / 代理
+```
 
-你需要从第三方服务商那里准备这几项信息：
+如果选择第三方 OpenAI 兼容接口，你需要准备：
 
 ```text
 API Base URL
@@ -153,17 +181,58 @@ API Key
 模型名 Model Name
 ```
 
-常见形式大概是：
+### 方式三：专用 OCR API
 
-```text
-API Base URL: https://你的服务商地址/v1
-API Key: 服务商给你的密钥
-模型名: 服务商提供的视觉模型名
+适合你：
+
+- 你已经有专门的 OCR 服务；
+- 你不想用通用 AI 视觉模型；
+- 你希望走传统 OCR 服务路线。
+
+运行配置向导：
+
+```bash
+python scripts/rebuild_pptx_from_images.py \
+  --input ./slide-images \
+  --output ./editable.pptx \
+  --ocr ocr-api \
+  --ocr-api-config-wizard
 ```
 
-工具会一步步问你这些信息，并可以保存配置，下一次就不用重复填写。
+它会让你选择：
 
-注意：不是所有第三方 OCR 都能直接用。这个工具支持的是“OpenAI 兼容接口”。如果某个服务商使用完全不同的专用 OCR 接口，需要单独开发适配器。
+```text
+1. OCR.space API
+2. Azure AI Vision Read OCR
+3. Google Cloud Vision OCR
+```
+
+不同服务需要的信息：
+
+| 服务 | 需要准备什么 |
+|---|---|
+| OCR.space | API Key，语言代码可选 |
+| Azure AI Vision | Endpoint URL、API Key，语言提示可选 |
+| Google Cloud Vision | API Key，语言提示可选 |
+
+如果你不知道选哪个，建议先从 `OCR.space` 开始，因为填写项最少。
+
+### 方式四：不识别文字，只生成图片版 PPT
+
+适合你：
+
+- 只想快速把图片变成 PPT；
+- 暂时没有 API Key；
+- 后续愿意手动添加文字框。
+
+运行：
+
+```bash
+python scripts/rebuild_pptx_from_images.py \
+  --input ./slide-images \
+  --output ./editable.pptx \
+  --ocr none
+```
 
 ## API Key 要不要保存？
 
@@ -196,16 +265,7 @@ python scripts/rebuild_pptx_from_images.py \
 
 它会自动判断环境，并在需要时询问你。
 
-### 只生成图片版 PPT
-
-```bash
-python scripts/rebuild_pptx_from_images.py \
-  --input ./slide-images \
-  --output ./editable.pptx \
-  --ocr none
-```
-
-### 使用本地 OCR
+### 本地 OCR
 
 ```bash
 python scripts/rebuild_pptx_from_images.py \
@@ -214,7 +274,7 @@ python scripts/rebuild_pptx_from_images.py \
   --ocr local
 ```
 
-### 使用 API 配置向导
+### AI 视觉识别
 
 ```bash
 python scripts/rebuild_pptx_from_images.py \
@@ -224,23 +284,24 @@ python scripts/rebuild_pptx_from_images.py \
   --api-config-wizard
 ```
 
-这个命令会让你选择：
-
-```text
-OpenAI 官方 API
-第三方 OpenAI 兼容 API
-```
-
-### 已经配置好第三方 API 后运行
+### 专用 OCR API
 
 ```bash
 python scripts/rebuild_pptx_from_images.py \
   --input ./slide-images \
   --output ./editable.pptx \
-  --ocr api
+  --ocr ocr-api \
+  --ocr-api-config-wizard
 ```
 
-如果之前保存过配置，工具会自动读取 `.env`。
+### 只生成图片版 PPT
+
+```bash
+python scripts/rebuild_pptx_from_images.py \
+  --input ./slide-images \
+  --output ./editable.pptx \
+  --ocr none
+```
 
 ## 生成的 PPT 文字为什么有时不准？
 
