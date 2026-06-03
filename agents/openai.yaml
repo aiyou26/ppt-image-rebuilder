@@ -1,0 +1,5 @@
+interface:
+  display_name: "PPT Image Rebuilder"
+  short_description: "Rebuild editable PowerPoint decks from exported slide images."
+  icon: "🖼️"
+  brand_color: "#6C5CE7"
