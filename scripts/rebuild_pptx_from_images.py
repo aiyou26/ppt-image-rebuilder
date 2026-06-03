@@ -2,8 +2,10 @@
 """
 Rebuild a best-effort editable PowerPoint deck from exported slide images.
 
-Default output is a visually faithful deck: each source image is placed on a
-PowerPoint slide, optionally with OCR/API-generated editable text boxes overlaid.
+Default output is a clean editable-text deck: each source image is placed on a
+PowerPoint slide, recognized text areas are erased from the image when possible,
+and OCR/API-generated editable text boxes are overlaid. Use
+--background-text-mode preserve to keep the source image untouched.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError as exc:
     raise SystemExit("Missing dependency: Pillow. Install with: pip install Pillow") from exc
 
@@ -150,6 +152,107 @@ def faded_copy(image_path: Path, opacity: float, temp_dir: Path) -> Path:
         blended.save(out)
         return out
 
+
+
+def _median_channel(values: List[int]) -> int:
+    if not values:
+        return 255
+    ordered = sorted(values)
+    return int(ordered[len(ordered) // 2])
+
+
+def _median_rgb(samples: List[Tuple[int, int, int]]) -> Tuple[int, int, int]:
+    if not samples:
+        return (255, 255, 255)
+    red = [pixel[0] for pixel in samples]
+    green = [pixel[1] for pixel in samples]
+    blue = [pixel[2] for pixel in samples]
+    return (_median_channel(red), _median_channel(green), _median_channel(blue))
+
+
+def _sample_crop_pixels(image: Image.Image, box: Tuple[int, int, int, int], max_side: int = 32) -> List[Tuple[int, int, int]]:
+    left, top, right, bottom = box
+    if right <= left or bottom <= top:
+        return []
+    crop = image.crop((left, top, right, bottom)).convert("RGB")
+    width, height = crop.size
+    if width <= 0 or height <= 0:
+        return []
+    scale = min(1.0, max_side / max(width, height))
+    if scale < 1.0:
+        crop = crop.resize((max(1, int(width * scale)), max(1, int(height * scale))))
+    return list(crop.getdata())
+
+
+def _clamp_rect(left: int, top: int, right: int, bottom: int, image_width: int, image_height: int) -> Tuple[int, int, int, int]:
+    return (
+        max(0, min(image_width, left)),
+        max(0, min(image_height, top)),
+        max(0, min(image_width, right)),
+        max(0, min(image_height, bottom)),
+    )
+
+
+def _text_item_pixel_rect(item: TextItem, image_width: int, image_height: int, padding: int) -> Tuple[int, int, int, int]:
+    x, y, w, h = normalize_box(item, image_width, image_height)
+    left = int(round(x * image_width)) - padding
+    top = int(round(y * image_height)) - padding
+    right = int(round((x + w) * image_width)) + padding
+    bottom = int(round((y + h) * image_height)) + padding
+    return _clamp_rect(left, top, right, bottom, image_width, image_height)
+
+
+def _sample_background_near_rect(image: Image.Image, rect: Tuple[int, int, int, int], ring: int = 16) -> Tuple[int, int, int]:
+    image_width, image_height = image.size
+    left, top, right, bottom = rect
+    outer_left, outer_top, outer_right, outer_bottom = _clamp_rect(
+        left - ring,
+        top - ring,
+        right + ring,
+        bottom + ring,
+        image_width,
+        image_height,
+    )
+    sample_boxes = [
+        (outer_left, outer_top, outer_right, top),
+        (outer_left, bottom, outer_right, outer_bottom),
+        (outer_left, top, left, bottom),
+        (right, top, outer_right, bottom),
+    ]
+    samples: List[Tuple[int, int, int]] = []
+    for sample_box in sample_boxes:
+        samples.extend(_sample_crop_pixels(image, sample_box))
+    if not samples:
+        samples.extend(_sample_crop_pixels(image, _clamp_rect(0, 0, image_width, min(image_height, 12), image_width, image_height)))
+    return _median_rgb(samples)
+
+
+def erased_text_background_copy(image_path: Path, text_items: Sequence[TextItem], temp_dir: Path, padding: int) -> Path:
+    """Create a copy of the slide image with recognized text regions covered.
+
+    This is intentionally conservative: it removes the original baked-in text by
+    painting each recognized text rectangle with a nearby background color, then
+    editable text boxes are added on top in PowerPoint. Complex photo/gradient
+    backgrounds may show patches, so users can switch to --background-text-mode
+    preserve when visual fidelity matters more than clean editability.
+    """
+    if not text_items:
+        return image_path
+    with Image.open(image_path) as src:
+        image = src.convert("RGB")
+    image_width, image_height = image.size
+    draw = ImageDraw.Draw(image)
+    effective_padding = max(0, int(padding))
+    for item in text_items:
+        rect = _text_item_pixel_rect(item, image_width, image_height, effective_padding)
+        left, top, right, bottom = rect
+        if right <= left or bottom <= top:
+            continue
+        fill = _sample_background_near_rect(image, rect, ring=max(12, effective_padding * 3))
+        draw.rectangle(rect, fill=fill)
+    out = temp_dir / f"text_erased_{image_path.stem}.png"
+    image.save(out)
+    return out
 
 def load_ocr_json(path: Path) -> Dict[str, List[TextItem]]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -1295,11 +1398,6 @@ def build_pptx(args: argparse.Namespace) -> None:
             with Image.open(image_path) as img:
                 image_width, image_height = img.size
 
-            if args.background_mode != "none":
-                pic_path = faded_copy(image_path, args.reference_opacity, tmp_dir)
-                left, top, width, height = fit_rect(image_width, image_height, slide_width, slide_height)
-                slide.shapes.add_picture(str(pic_path), left, top, width=width, height=height)
-
             text_items = items_for_image(
                 image_path=image_path,
                 index=index,
@@ -1314,6 +1412,20 @@ def build_pptx(args: argparse.Namespace) -> None:
             )
             if args.max_text_items and len(text_items) > args.max_text_items:
                 text_items = text_items[: args.max_text_items]
+
+            if args.background_mode != "none":
+                background_source = image_path
+                if args.background_text_mode == "erase" and text_items:
+                    background_source = erased_text_background_copy(
+                        image_path=image_path,
+                        text_items=text_items,
+                        temp_dir=tmp_dir,
+                        padding=args.erase_padding,
+                    )
+                pic_path = faded_copy(background_source, args.reference_opacity, tmp_dir)
+                left, top, width, height = fit_rect(image_width, image_height, slide_width, slide_height)
+                slide.shapes.add_picture(str(pic_path), left, top, width=width, height=height)
+
             total_text_items += len(text_items)
             for item in text_items:
                 add_text_item(
@@ -1329,6 +1441,7 @@ def build_pptx(args: argparse.Namespace) -> None:
     print(f"Created {output_path}")
     print(f"Slides: {len(images)}")
     print(f"Background mode: {args.background_mode}")
+    print(f"Background text mode: {args.background_text_mode}")
     print(f"OCR mode: {resolved_ocr_mode}")
     print(f"Editable text boxes: {total_text_items}")
 
@@ -1339,6 +1452,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Output .pptx path.")
     parser.add_argument("--slide-size", choices=["auto", "16:9", "4:3"], default="auto", help="Output slide size.")
     parser.add_argument("--background-mode", choices=["full", "none"], default="full", help="Place source images on slides or omit them.")
+    parser.add_argument("--background-text-mode", choices=["erase", "preserve"], default="erase", help="When recognized text is available, erase baked-in source-image text before adding editable text boxes. Use preserve for maximum original-image fidelity.")
+    parser.add_argument("--erase-padding", type=int, default=6, help="Pixel padding around recognized text boxes when --background-text-mode erase is used.")
     parser.add_argument("--reference-opacity", type=float, default=1.0, help="Opacity for source image layer, from 0 to 1.")
     parser.add_argument("--ocr", choices=["auto", "local", "api", "ocr-api", "json", "none"], default="auto", help="Recognition source for editable text boxes: local OCR, AI vision API, dedicated OCR API, JSON, or none.")
     parser.add_argument("--ocr-json", help="Optional sidecar OCR JSON file.")

@@ -1,13 +1,13 @@
 ---
 name: ppt-image-rebuilder
-description: rebuild editable powerpoint files from ppt-exported slide images such as png, jpg, or jpeg screenshots. use this when the user has images exported from slides and wants a best-effort editable .pptx, OCR text overlay, OpenAI API vision text extraction, OpenAI-compatible third-party API vision text extraction, dedicated OCR APIs such as OCR.space, Azure AI Vision, or Google Cloud Vision, local Tesseract OCR setup, layout reconstruction, visual reference backgrounds, or a repeatable workflow for converting static slide images back into powerpoint decks.
+description: rebuild editable powerpoint files from ppt-exported slide images such as png, jpg, or jpeg screenshots. use this when the user has images exported from slides and wants a best-effort editable .pptx, OCR text overlay, OpenAI API vision text extraction, OpenAI-compatible third-party API vision text extraction, dedicated OCR APIs such as OCR.space, Azure AI Vision, or Google Cloud Vision, local Tesseract OCR setup, layout reconstruction, cleaned visual reference backgrounds with original text removal, or a repeatable workflow for converting static slide images back into powerpoint decks.
 ---
 
 # PPT Image Rebuilder
 
 ## Goal
 
-Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. Be explicit that image-to-PPT reconstruction cannot perfectly recover the original object tree. The preferred deliverable is a visually faithful PowerPoint with the original image as a reference/background plus editable text boxes from local OCR, AI vision recognition through OpenAI or OpenAI-compatible third-party APIs, dedicated OCR APIs such as OCR.space/Azure Vision/Google Vision, or a sidecar JSON file.
+Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. Be explicit that image-to-PPT reconstruction cannot perfectly recover the original object tree. The preferred deliverable is a visually faithful PowerPoint with a cleaned reference/background image and editable text boxes from local OCR, AI vision recognition through OpenAI or OpenAI-compatible third-party APIs, dedicated OCR APIs such as OCR.space/Azure Vision/Google Vision, or a sidecar JSON file. By default, recognized text regions in the background image should be erased before editable text boxes are added, so users do not see duplicate baked-in text behind editable text.
 
 ## Default Workflow
 
@@ -27,6 +27,7 @@ Turn a folder of PPT-exported slide images into a best-effort editable `.pptx`. 
 4. Generate a first-pass editable deck:
    - Run `scripts/rebuild_pptx_from_images.py`.
    - Use `--background-mode full` for visually faithful output.
+   - Keep the default `--background-text-mode erase` so recognized original text is removed from the background before editable text boxes are added. Use `--background-text-mode preserve` only when complex backgrounds make erasing look worse.
 5. Review the output:
    - Check slide count, page order, aspect ratio, and visible alignment.
    - Confirm text boxes are selectable/editable in PowerPoint.
@@ -88,6 +89,13 @@ Skip OCR and create a visually faithful background deck:
 ```bash
 python scripts/rebuild_pptx_from_images.py --input /path/to/slide-images --output /path/to/editable.pptx --ocr none --background-mode full
 ```
+
+## Background Text Rules
+
+- Default to `--background-text-mode erase`. When text recognition returns boxes, the script creates a cleaned copy of each slide image by covering the original baked-in text regions with nearby background color, then places editable text boxes on top.
+- Use `--background-text-mode preserve` only when the user prioritizes exact visual fidelity or the slide has complex photos, gradients, or patterned backgrounds where automatic text erasing leaves visible patches.
+- Explain to users that text erasing is best-effort. It prevents obvious double text in many simple slides, but it cannot perfectly reconstruct complex backgrounds hidden behind the original text.
+- If `--ocr none` or recognition returns no text items, there are no text regions to erase, so the original image remains unchanged.
 
 ## OCR Mode Rules
 
